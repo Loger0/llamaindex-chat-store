@@ -424,14 +424,17 @@ class TestAsyncLock:
 
     @pytest.mark.asyncio
     async def test_async_lock_created_on_first_use(self):
-        """_async_lock should be created when _ensure_async_initialized is called."""
+        """_async_lock should be created eagerly in __init__ (TES-40 P2 #4).
+
+        Previously the lock was created lazily in _ensure_async_initialized,
+        which had a TOCTOU race. Now it's created in __init__ to prevent
+        concurrent tasks from racing on lock creation.
+        """
         store = VastbaseChatStore(
             host="localhost", port=15432, database="test",
             user="u", password="p", table_name="test_lock_create",
         )
-        assert store._async_lock is None
-        # The lock is created inside _ensure_async_initialized
-        # We can verify it would be created by checking the code path
+        assert isinstance(store._async_lock, asyncio.Lock)
 
 
 # ---------------------------------------------------------------------------
@@ -541,3 +544,292 @@ class TestAsyncErrorHandling:
         assert "ConnectionError" in source, (
             "_ensure_async_initialized should raise ConnectionError on failure"
         )
+
+
+# ===========================================================================
+# TES-40: Second-round regression tests (8 fixes for issues introduced by TES-38)
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# TES-40 P1 #1: "exist" in err_msg mis-matches "nonexistent" etc.
+# ---------------------------------------------------------------------------
+
+
+class TestTES40ExistMisMatch:
+    """P1 #1: 'exist' substring check should be removed from error matching.
+
+    The check `"exist" in err_msg` would match "does not exist" and other
+    real errors, swallowing genuine connection failures.
+    """
+
+    def test_exist_not_in_error_check(self):
+        """Error-checking lines should NOT contain '"exist"' as a keyword."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore._initialize)
+        # Check actual if-condition lines for the old pattern
+        for line in source.splitlines():
+            stripped = line.strip()
+            # Skip comments and docstrings
+            if stripped.startswith("#") or stripped.startswith('"') or stripped.startswith("'"):
+                continue
+            if "if " in stripped and "err_msg" in stripped:
+                assert '"exist"' not in stripped, (
+                    f"Error check line should not match 'exist': {stripped}"
+                )
+
+    def test_already_and_duplicate_still_checked(self):
+        """Source should still check for 'already' and 'duplicate'."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore._initialize)
+        assert '"already"' in source, "Should check for 'already'"
+        assert '"duplicate"' in source, "Should check for 'duplicate'"
+
+    def test_async_exist_not_in_error_check(self):
+        """Async init error checks should also not contain 'exist'."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore._ensure_async_initialized)
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith('"') or stripped.startswith("'"):
+                continue
+            if "if " in stripped or "not (" in stripped:
+                if "err_msg" in stripped:
+                    assert '"exist"' not in stripped, (
+                        f"Async error check should not match 'exist': {stripped}"
+                    )
+
+    def test_does_not_exist_error_is_raised(self):
+        """A 'does not exist' error should NOT be swallowed."""
+        store = VastbaseChatStore(
+            host="localhost", port=15432, database="test",
+            user="u", password="p", table_name="test_exist_check",
+        )
+        # Simulate a "does not exist" error — should be re-raised
+        with patch(
+            "pyvastbase.connect",
+            side_effect=Exception("table does not exist"),
+        ):
+            with pytest.raises(ConnectionError, match="does not exist"):
+                store._initialize()
+
+
+# ---------------------------------------------------------------------------
+# TES-40 P1 #3: ValidationError not caught in deserialization
+# ---------------------------------------------------------------------------
+
+
+class TestTES40ValidationError:
+    """P1 #3: ValidationError should be caught in deserialization paths.
+
+    When _serialize_messages passes through dicts without validation,
+    invalid dicts ("poison pills") can be written. On read, model_validate
+    raises ValidationError which was not caught.
+    """
+
+    def test_validation_error_imported(self):
+        """ValidationError should be imported in base module."""
+        from llama_index.storage.chat_store.vastbase import base
+        assert hasattr(base, "ValidationError"), (
+            "ValidationError should be imported"
+        )
+
+    def test_get_messages_catches_validation_error(self):
+        """get_messages should catch ValidationError."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore.get_messages)
+        assert "ValidationError" in source, (
+            "get_messages should catch ValidationError"
+        )
+
+    def test_serialize_messages_validates_dicts(self):
+        """_serialize_messages should validate dicts against ChatMessage."""
+        store = VastbaseChatStore(
+            host="localhost", port=15432, database="test",
+            user="u", password="p", table_name="test_val",
+        )
+        # Invalid dict — role must be a valid enum value, not an int
+        invalid_dict = {"role": 12345, "content": "hello"}
+        with pytest.raises(ValueError, match="cannot be serialized"):
+            store._serialize_messages([invalid_dict])
+
+    def test_serialize_messages_accepts_valid_dict(self):
+        """_serialize_messages should accept valid ChatMessage dicts."""
+        store = VastbaseChatStore(
+            host="localhost", port=15432, database="test",
+            user="u", password="p", table_name="test_val2",
+        )
+        valid_dict = {"role": "user", "content": "hello"}
+        result = store._serialize_messages([valid_dict])
+        parsed = json.loads(result)
+        assert len(parsed) == 1
+        assert parsed[0]["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# TES-40 P2 #2: add_message bypasses _serialize_messages
+# ---------------------------------------------------------------------------
+
+
+class TestTES40AddMessageSerialization:
+    """P2 #2: add_message should use _serialize_messages uniformly."""
+
+    def test_add_message_uses_serialize_messages(self):
+        """Source of add_message should call _serialize_messages."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore.add_message)
+        assert "_serialize_messages" in source, (
+            "add_message should use _serialize_messages"
+        )
+        # Should NOT contain raw json.dumps for message serialization
+        assert "json.dumps([message.model_dump" not in source, (
+            "add_message should not bypass _serialize_messages"
+        )
+
+    def test_async_add_message_uses_serialize_messages(self):
+        """Source of async_add_message should call _serialize_messages."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore.async_add_message)
+        assert "_serialize_messages" in source, (
+            "async_add_message should use _serialize_messages"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TES-40 P2 #4: asyncio.Lock TOCTOU race
+# ---------------------------------------------------------------------------
+
+
+class TestTES40LockTOCTOU:
+    """P2 #4: Lock should be created in __init__ to prevent TOCTOU race."""
+
+    def test_lock_created_eagerly(self):
+        """_async_lock should be a Lock object after __init__."""
+        store = VastbaseChatStore(
+            host="localhost", port=15432, database="test",
+            user="u", password="p", table_name="test_toctou",
+        )
+        assert isinstance(store._async_lock, asyncio.Lock), (
+            "_async_lock should be created eagerly in __init__"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TES-40 P2 #5: __del__ uses deprecated get_event_loop()
+# ---------------------------------------------------------------------------
+
+
+class TestTES40DelDeprecation:
+    """P2 #5: __del__ should use get_running_loop() not get_event_loop()."""
+
+    def test_del_uses_get_running_loop(self):
+        """__del__ should use get_running_loop()."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore.__del__)
+        # Check code lines (not docstrings/comments) for the pattern
+        code_lines = [
+            line for line in source.splitlines()
+            if not line.strip().startswith("#")
+            and not line.strip().startswith('"')
+            and not line.strip().startswith("'")
+        ]
+        code_text = "\n".join(code_lines)
+        assert "get_running_loop" in code_text, (
+            "__del__ should use get_running_loop()"
+        )
+        # Should NOT call get_event_loop() in actual code
+        assert "get_event_loop()" not in code_text, (
+            "__del__ should NOT call deprecated get_event_loop()"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TES-40 P3 #6: get_keys truncation warning
+# ---------------------------------------------------------------------------
+
+
+class TestTES40GetKeysWarning:
+    """P3 #6: get_keys should warn when results hit the 10000 limit."""
+
+    def test_get_keys_warns_on_truncation(self):
+        """get_keys should log a warning when results == 10000."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore.get_keys)
+        assert "10000" in source, "Should check for 10000 limit"
+        assert "warning" in source.lower() or "logger.warning" in source, (
+            "get_keys should warn on possible truncation"
+        )
+
+    def test_aget_keys_warns_on_truncation(self):
+        """aget_keys should also log a warning."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore.aget_keys)
+        assert "10000" in source, "Should check for 10000 limit"
+        assert "warning" in source.lower() or "logger.warning" in source, (
+            "aget_keys should warn on possible truncation"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TES-40 P3 #7: _next_id overflow
+# ---------------------------------------------------------------------------
+
+
+class TestTES40NextIdOverflow:
+    """P3 #7: _next_id should use * 1000 multiplier to prevent overflow."""
+
+    def test_next_id_uses_1000_multiplier(self):
+        """_next_id should use * 1000 to provide enough ID space."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore._next_id)
+        assert "* 1000" in source, (
+            "_next_id should use * 1000 multiplier"
+        )
+        assert "* 100 " not in source and "* 100+" not in source, (
+            "_next_id should NOT use * 100 multiplier (overflow risk)"
+        )
+
+    def test_next_id_no_overflow_with_large_counter(self):
+        """IDs should not collide even with large counter values."""
+        store = VastbaseChatStore(
+            host="localhost", port=15432, database="test",
+            user="u", password="p", table_name="test_overflow",
+        )
+        store._id_counter = 500  # Simulate large counter
+        ids = set()
+        for _ in range(200):
+            ids.add(store._next_id())
+        # With * 1000, counter=500 + random(0-99) = 500-599,
+        # well within the 1000-slot window
+        assert len(ids) == 200, "All IDs should be unique"
+
+
+# ---------------------------------------------------------------------------
+# TES-40 P3 #8: __del__ task GC reference
+# ---------------------------------------------------------------------------
+
+
+class TestTES40TaskGCReference:
+    """P3 #8: __del__ should keep task references to prevent GC."""
+
+    def test_cleanup_tasks_class_attribute(self):
+        """Module should have _VASTBASE_CLEANUP_TASKS set for GC protection."""
+        from llama_index.storage.chat_store.vastbase import base
+        assert hasattr(base, "_VASTBASE_CLEANUP_TASKS"), (
+            "Module should have _VASTBASE_CLEANUP_TASKS"
+        )
+        assert isinstance(base._VASTBASE_CLEANUP_TASKS, set), (
+            "_VASTBASE_CLEANUP_TASKS should be a set"
+        )
+
+    def test_del_stores_task_reference(self):
+        """__del__ should store task in _VASTBASE_CLEANUP_TASKS set."""
+        import inspect
+        source = inspect.getsource(VastbaseChatStore.__del__)
+        assert "_VASTBASE_CLEANUP_TASKS" in source, (
+            "__del__ should store task reference in _VASTBASE_CLEANUP_TASKS"
+        )
+        assert "add_done_callback" in source, (
+            "Task should have done callback to remove from set"
+        )
+

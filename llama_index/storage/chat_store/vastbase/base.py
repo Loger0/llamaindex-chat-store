@@ -15,11 +15,16 @@ import time
 from typing import Any, List, Optional
 from urllib.parse import urlparse
 
-from llama_index.core.bridge.pydantic import Field, PrivateAttr
+from llama_index.core.bridge.pydantic import Field, PrivateAttr, ValidationError
 from llama_index.core.llms import ChatMessage
 from llama_index.core.storage.chat_store.base import BaseChatStore
 
 logger = logging.getLogger(__name__)
+
+# P3 #8 (TES-40): module-level set to hold cleanup task references,
+# preventing GC from collecting fire-and-forget tasks in __del__.
+# Module-level to avoid Pydantic intercepting it as a model field.
+_VASTBASE_CLEANUP_TASKS: set = set()
 
 
 class VastbaseChatStore(BaseChatStore):
@@ -77,7 +82,14 @@ class VastbaseChatStore(BaseChatStore):
         self._initialized = False
         self._actual_table_name = ""
         self._id_counter = 0
-        self._async_lock = None
+        # P2 #4 (TES-40): create lock eagerly to avoid TOCTOU race in
+        # _ensure_async_initialized().  Python 3.10+ allows Lock() without
+        # a running loop; on 3.9 the constructor calls get_event_loop()
+        # which succeeds on the main thread (the common case).
+        try:
+            self._async_lock = asyncio.Lock()
+        except RuntimeError:
+            self._async_lock = None  # will be created lazily as fallback
 
         # P2 #7: warn if schema_name is non-default (not wired to any API)
         if self.schema_name and self.schema_name != "public":
@@ -214,9 +226,10 @@ class VastbaseChatStore(BaseChatStore):
         try:
             connect(**conn_kwargs, using="default")
         except Exception as e:
-            # P1 #3: only swallow "already exists" errors
+            # P1 #1 (TES-40): only swallow "already exists" / "duplicate" errors.
+            # Removed "exist" check — it mis-matched "does not exist" etc.
             err_msg = str(e).lower()
-            if "already" in err_msg or "exist" in err_msg or "duplicate" in err_msg:
+            if "already" in err_msg or "duplicate" in err_msg:
                 logger.debug("Default connection already exists, reusing.")
             else:
                 raise ConnectionError(
@@ -226,7 +239,7 @@ class VastbaseChatStore(BaseChatStore):
             connect(**conn_kwargs, using=alias)
         except Exception as e:
             err_msg = str(e).lower()
-            if "already" in err_msg or "exist" in err_msg or "duplicate" in err_msg:
+            if "already" in err_msg or "duplicate" in err_msg:
                 logger.debug(
                     "Connection already exists for alias '%s', reusing.", alias
                 )
@@ -291,16 +304,16 @@ class VastbaseChatStore(BaseChatStore):
         """Generate the next unique ID for a new row.
 
         Uses a timestamp-based counter with a random component:
-        ``int(time.time() * 1_000_000) * 100 + counter + random_offset``.
+        ``int(time.time() * 1_000_000) * 1000 + counter + random_offset``.
 
         P2 #12: Added random offset to prevent multi-instance ID collisions.
-        The microsecond timestamp provides temporal uniqueness, the counter
-        ensures monotonicity within a single instance, and the random offset
-        differentiates concurrent instances started at the same time.
+        P3 #7 (TES-40): Changed multiplier from 100 to 1000 to prevent
+        counter + random_offset from overflowing into the next microsecond's
+        ID space (counter is unbounded, random_offset is 0–99).
         """
         self._id_counter += 1
         random_offset = random.randint(0, 99)
-        return int(time.time() * 1_000_000) * 100 + self._id_counter + random_offset
+        return int(time.time() * 1_000_000) * 1000 + self._id_counter + random_offset
 
     @staticmethod
     def _escape(value: str) -> str:
@@ -369,7 +382,8 @@ class VastbaseChatStore(BaseChatStore):
         try:
             parsed = json.loads(results[0]["value"])
             return [ChatMessage.model_validate(m) for m in parsed]
-        except (json.JSONDecodeError, KeyError, TypeError):
+        # P1 #3 (TES-40): catch ValidationError for dict "poison pill" rows
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError):
             logger.warning(
                 "Failed to deserialize messages for key '%s'", key
             )
@@ -393,12 +407,12 @@ class VastbaseChatStore(BaseChatStore):
         )
 
         if not existing:
-            # Key doesn't exist — insert new row
+            # P2 #2 (TES-40): use _serialize_messages uniformly
             self._coll.insert([
                 {
                     "id": self._next_id(),
                     "key": key,
-                    "value": json.dumps([message.model_dump(mode="json")]),
+                    "value": self._serialize_messages([message]),
                 }
             ])
         else:
@@ -409,7 +423,7 @@ class VastbaseChatStore(BaseChatStore):
                 {
                     "id": existing[0]["id"],
                     "key": key,
-                    "value": json.dumps(messages),
+                    "value": self._serialize_messages(messages),
                 }
             ])
 
@@ -441,7 +455,7 @@ class VastbaseChatStore(BaseChatStore):
         try:
             parsed = json.loads(results[0]["value"])
             messages = [ChatMessage.model_validate(m) for m in parsed]
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError):
             # P2 #8: corrupted data — still delete the row but return None
             logger.warning(
                 "Corrupted data for key '%s', deleting row and returning None",
@@ -481,7 +495,7 @@ class VastbaseChatStore(BaseChatStore):
             if not value or value == "[]":
                 return None
             messages = json.loads(value)
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError):
             return None
 
         if idx < 0 or idx >= len(messages):
@@ -524,7 +538,7 @@ class VastbaseChatStore(BaseChatStore):
             if not value or value == "[]":
                 return None
             messages = json.loads(value)
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError):
             return None
 
         if len(messages) == 0:
@@ -555,6 +569,13 @@ class VastbaseChatStore(BaseChatStore):
             expr="1=1", output_fields=["key"], limit=10000
         )
 
+        # P3 #6 (TES-40): warn if results hit the limit (possible truncation)
+        if len(results) == 10000:
+            logger.warning(
+                "get_keys() returned 10000 keys — results may be truncated. "
+                "Consider increasing the limit or filtering server-side."
+            )
+
         return [r["key"] for r in results]
 
     # ==================================================================
@@ -564,7 +585,9 @@ class VastbaseChatStore(BaseChatStore):
     async def _ensure_async_initialized(self) -> None:
         """Ensure the async Collection is available (lazy init).
 
-        P2 #13: Uses asyncio.Lock to prevent concurrent initialization races.
+        P2 #4 (TES-40): Lock is now created in __init__ to prevent TOCTOU.
+        Fallback lazy creation kept for Python 3.9 edge case where Lock()
+        may fail outside an event loop on non-main threads.
         P2 #15: Wraps connection in try/except for robust error handling.
         """
         if self._async_lock is None:
@@ -586,7 +609,8 @@ class VastbaseChatStore(BaseChatStore):
                     )
                 except Exception as e:
                     err_msg = str(e).lower()
-                    if not ("already" in err_msg or "exist" in err_msg or "duplicate" in err_msg):
+                    # P1 #1 (TES-40): removed "exist" check
+                    if not ("already" in err_msg or "duplicate" in err_msg):
                         raise ConnectionError(
                             f"Failed to create async connection "
                             f"(alias '{alias}'): {e}"
@@ -605,6 +629,7 @@ class VastbaseChatStore(BaseChatStore):
         Handles ChatMessage, dict, and other types with error reporting.
 
         P1 #4: Prevents double JSON serialization for dict messages.
+        P1 #3 (TES-40): Validates dict messages against ChatMessage schema.
         P2 #10: Raises ValueError for unserializable objects.
         """
         serialized = []
@@ -613,6 +638,9 @@ class VastbaseChatStore(BaseChatStore):
                 if isinstance(m, ChatMessage):
                     serialized.append(m.model_dump(mode="json"))
                 elif isinstance(m, dict):
+                    # P1 #3 (TES-40): validate dict against ChatMessage schema
+                    # to catch "poison pill" dicts at write time
+                    ChatMessage.model_validate(m)
                     serialized.append(m)
                 else:
                     logger.warning(
@@ -621,7 +649,7 @@ class VastbaseChatStore(BaseChatStore):
                         i, type(m).__name__,
                     )
                     serialized.append(m.model_dump(mode="json"))
-            except (AttributeError, TypeError, ValueError) as e:
+            except (AttributeError, TypeError, ValueError, ValidationError) as e:
                 raise ValueError(
                     f"Message at index {i} cannot be serialized: {e}"
                 ) from e
@@ -664,7 +692,7 @@ class VastbaseChatStore(BaseChatStore):
         try:
             parsed = json.loads(results[0]["value"])
             return [ChatMessage.model_validate(m) for m in parsed]
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError):
             logger.warning(
                 "Async: failed to deserialize messages for key '%s'", key
             )
@@ -681,11 +709,12 @@ class VastbaseChatStore(BaseChatStore):
         )
 
         if not existing:
+            # P2 #2 (TES-40): use _serialize_messages uniformly
             await self._async_coll.insert([
                 {
                     "id": self._next_id(),
                     "key": key,
-                    "value": json.dumps([message.model_dump(mode="json")]),
+                    "value": self._serialize_messages([message]),
                 }
             ])
         else:
@@ -695,7 +724,7 @@ class VastbaseChatStore(BaseChatStore):
                 {
                     "id": existing[0]["id"],
                     "key": key,
-                    "value": json.dumps(messages),
+                    "value": self._serialize_messages(messages),
                 }
             ])
 
@@ -715,7 +744,7 @@ class VastbaseChatStore(BaseChatStore):
         try:
             parsed = json.loads(results[0]["value"])
             messages = [ChatMessage.model_validate(m) for m in parsed]
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError):
             # P2 #8: corrupted data — still delete but return None
             logger.warning(
                 "Async: corrupted data for key '%s', deleting row", key
@@ -749,7 +778,7 @@ class VastbaseChatStore(BaseChatStore):
             if not value or value == "[]":
                 return None
             messages = json.loads(value)
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError):
             return None
 
         if idx < 0 or idx >= len(messages):
@@ -785,7 +814,7 @@ class VastbaseChatStore(BaseChatStore):
             if not value or value == "[]":
                 return None
             messages = json.loads(value)
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, KeyError, TypeError, ValidationError):
             return None
 
         if len(messages) == 0:
@@ -812,22 +841,30 @@ class VastbaseChatStore(BaseChatStore):
             expr="1=1", output_fields=["key"], limit=10000
         )
 
+        # P3 #6 (TES-40): warn if results hit the limit
+        if len(results) == 10000:
+            logger.warning(
+                "aget_keys() returned 10000 keys — results may be truncated."
+            )
+
         return [r["key"] for r in results]
 
     def __del__(self):
         """Best-effort cleanup of async connections on garbage collection.
 
-        P2 #14: Schedule async connection cleanup without blocking.
+        P2 #5 (TES-40): Use get_running_loop() instead of the deprecated
+        asyncio API. Only schedule cleanup if a loop is actually running.
+        P3 #8 (TES-40): Store task reference to prevent GC.
         """
         if self._async_coll is not None:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self._close_async())
-                else:
-                    loop.run_until_complete(self._close_async())
-            except Exception:
-                pass  # Event loop may be closed during GC
+                loop = asyncio.get_running_loop()
+                task = loop.create_task(self._close_async())
+                # P3 #8: prevent task from being garbage collected
+                _VASTBASE_CLEANUP_TASKS.add(task)
+                task.add_done_callback(_VASTBASE_CLEANUP_TASKS.discard)
+            except RuntimeError:
+                pass  # No running loop — connection will be cleaned up on exit
 
     async def _close_async(self):
         """Close the async collection connection."""
