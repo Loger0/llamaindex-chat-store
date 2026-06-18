@@ -18,7 +18,7 @@
 | code-reviewer | ✅ 完成 | Plan-Check Round 4 passed |
 | convention-extractor | ✅ 完成 | Conventions extracted |
 | adapter-dev | ✅ 完成 | VastbaseChatStore 实现 (14 methods, 716 lines) |
-| **test-scout** | **✅ 完成 (v2)** | **67 tests, 50 PASS, 17 ⚠️ SDK bug** |
+| **test-scout** | **✅ 完成 (v2)** | **68 tests, 68 PASS (async SDK bug resolved)** |
 | eco-issue-splitter | ✅ 完成 | 4 sub-issues created under TES-29 (TES-30~33) |
 | task-dispatcher | ⏳ 待分配 | Next routing |
 
@@ -29,10 +29,10 @@
 | 需求分析 | ✅ | Profile, Decisions |
 | 方案设计 | ✅ | Spec, Plan (Plan-Check R4 passed) |
 | 人审门禁 | ✅ | Approved by luoyj |
-| **测试规划** | **✅** | **67 tests: 50 PASS + 17 async ⚠️ (pyvastbase SDK bug)** |
+| **测试规划** | **✅** | **68 tests: 68 PASS (async SDK bug resolved)** |
 | 代码实现 | ✅ | base.py (716 lines), __init__.py, pyproject.toml |
 | **任务拆分** | **✅** | **4 sub-issues under TES-29: TES-30~33 (旧 TES-10~13 已取消)** |
-| 验证 | ⏳ | Pending — async tests blocked by SDK |
+| 验证 | ✅ TES-30 | 68/68 PASS, Nyquist 40/40 (100%), async SDK bug resolved |
 
 ## Sub-Issues (TES-29 children)
 
@@ -51,10 +51,11 @@
 - **URI format**: vastbase://user:pass@host:port/db
 - **Error handling**: Silent None/empty list (matches upstream)
 
-## Test Results (2026-06-18)
+## Test Results (2026-06-18, test-adapter verified)
 
 - test_compat.py: 11/11 ✅
 - test_chat_store_sync.py: 22/22 ✅
-- test_chat_store_init.py: 10/10 ✅
+- test_chat_store_init.py: 11/11 ✅ (includes test_from_uri_rejects_postgresql_scheme)
 - test_chat_store_integration.py: 7/7 ✅
-- test_chat_store_async.py: 0/17 ⚠️ (pyvastbase 0.2.7 AsyncCollection named placeholder bug)
+- test_chat_store_async.py: 17/17 ✅ (SDK bug resolved)
+- **Total: 68/68 PASS** | Nyquist: 40/40 requirements covered (100%)
