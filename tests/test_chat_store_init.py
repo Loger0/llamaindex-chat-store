@@ -98,6 +98,17 @@ def test_from_uri_default_table_name():
     assert store.table_name == "chatstore"
 
 
+def test_from_uri_rejects_postgresql_scheme():
+    """from_uri should raise ValueError for non-vastbase URI schemes.
+
+    Acceptance criteria: from_uri("postgresql://...") raises ValueError.
+    Only vastbase:// scheme is supported.
+    """
+    uri = "postgresql://user:pass@host:5432/mydb"
+    with pytest.raises(ValueError, match="Unsupported URI scheme"):
+        VastbaseChatStore.from_uri(uri)
+
+
 # ---------------------------------------------------------------------------
 # Table naming
 # ---------------------------------------------------------------------------
