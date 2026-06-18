@@ -8,6 +8,7 @@
 - **Target Repo**: https://github.com/Loger0/llamaindex-chat-store.git
 - **Feature Branch**: `feature/llamaindex-chat-store-vastbase-adapter`
 - **Reference**: llama-index-storage-chat-store-postgres v0.4.0 (upstream 实际 v0.2.0)
+- **Parent Issue**: TES-29 (0aedd40c-b137-4cc1-9455-6287e677d498)
 
 ## Agent Status
 
@@ -18,7 +19,7 @@
 | convention-extractor | ✅ 完成 | Conventions extracted |
 | adapter-dev | ✅ 完成 | VastbaseChatStore 实现 (14 methods, 716 lines) |
 | **test-scout** | **✅ 完成 (v2)** | **67 tests, 50 PASS, 17 ⚠️ SDK bug** |
-| eco-issue-splitter | ✅ 完成 | 4 sub-issues created |
+| eco-issue-splitter | ✅ 完成 | 4 sub-issues created under TES-29 (TES-30~33) |
 | task-dispatcher | ⏳ 待分配 | Next routing |
 
 ## Phase Status
@@ -30,8 +31,17 @@
 | 人审门禁 | ✅ | Approved by luoyj |
 | **测试规划** | **✅** | **67 tests: 50 PASS + 17 async ⚠️ (pyvastbase SDK bug)** |
 | 代码实现 | ✅ | base.py (716 lines), __init__.py, pyproject.toml |
-| 任务拆分 | ✅ | 4 sub-issues (TES-10~13) |
+| **任务拆分** | **✅** | **4 sub-issues under TES-29: TES-30~33 (旧 TES-10~13 已取消)** |
 | 验证 | ⏳ | Pending — async tests blocked by SDK |
+
+## Sub-Issues (TES-29 children)
+
+| Wave | Issue | Title | Status | Multica ID |
+|------|-------|-------|--------|------------|
+| 0 | TES-30 | 基础设施 — 包脚手架 + 初始化 + 数据模型 | todo | 456924e6-ddae-4bc0-9d9e-f692f8d276a2 |
+| 1 | TES-31 | 核心 CRUD — set_messages + get_messages + add_message | backlog | 229409e3-aa65-4d5f-80d9-9e780a64cfd7 |
+| 2 | TES-32 | 删除操作 — delete_messages + delete_message + delete_last_message + get_keys | backlog | b78e19be-17a4-4130-a5b0-b5c07971db48 |
+| 3 | TES-33 | 异步方法 + 集成测试 + 兼容性 + 文档 | backlog | 200e2303-9f1b-455c-a563-09eed7742e73 |
 
 ## Key Decisions
 
