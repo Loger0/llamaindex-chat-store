@@ -7,13 +7,15 @@ psycopg, asyncpg, or raw SQL.
 Reference: llama-index-storage-chat-store-postgres v0.4.0
 """
 
+import asyncio
 import json
 import logging
+import random
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 from urllib.parse import urlparse
 
-from llama_index.core.bridge.pydantic import PrivateAttr
+from llama_index.core.bridge.pydantic import Field, PrivateAttr
 from llama_index.core.llms import ChatMessage
 from llama_index.core.storage.chat_store.base import BaseChatStore
 
@@ -49,7 +51,7 @@ class VastbaseChatStore(BaseChatStore):
     port: int = 15432
     database: str = "vastbase"
     user: str = ""
-    password: str = ""
+    password: str = Field(default="", repr=False)  # P0 #2: mask in repr/dump
 
     # === Private attributes ===
     _coll: Optional[object] = PrivateAttr(default=None)
@@ -57,6 +59,7 @@ class VastbaseChatStore(BaseChatStore):
     _initialized: bool = PrivateAttr(default=False)
     _actual_table_name: str = PrivateAttr(default="")
     _id_counter: int = PrivateAttr(default=0)
+    _async_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
 
     def __init__(self, **data):
         """Initialize VastbaseChatStore.
@@ -64,12 +67,26 @@ class VastbaseChatStore(BaseChatStore):
         Accepts all BaseChatStore + VastbaseChatStore Pydantic fields.
         Call _initialize() to set up connection and Collection.
         """
+        # P1 #6: lowercase table_name in direct constructor too
+        if "table_name" in data and data["table_name"]:
+            data["table_name"] = data["table_name"].lower()
+
         super().__init__(**data)
         self._coll = None
         self._async_coll = None
         self._initialized = False
         self._actual_table_name = ""
         self._id_counter = 0
+        self._async_lock = None
+
+        # P2 #7: warn if schema_name is non-default (not wired to any API)
+        if self.schema_name and self.schema_name != "public":
+            logger.warning(
+                "schema_name='%s' is accepted but not used by pyvastbase "
+                "Collection API. All collections are created in the default "
+                "schema. This parameter is reserved for future use.",
+                self.schema_name,
+            )
 
     # ==================================================================
     # Factory Methods
@@ -149,7 +166,7 @@ class VastbaseChatStore(BaseChatStore):
 
         host = parsed.hostname or "localhost"
         port = parsed.port or 15432
-        database = parsed.path.lstrip("/") if parsed.path else "vastbase"
+        database = parsed.path.strip("/") or "vastbase"
         user = parsed.username or ""
         password = parsed.password or ""
 
@@ -196,14 +213,27 @@ class VastbaseChatStore(BaseChatStore):
         )
         try:
             connect(**conn_kwargs, using="default")
-        except Exception:
-            logger.debug("Default connection already exists, reusing.")
+        except Exception as e:
+            # P1 #3: only swallow "already exists" errors
+            err_msg = str(e).lower()
+            if "already" in err_msg or "exist" in err_msg or "duplicate" in err_msg:
+                logger.debug("Default connection already exists, reusing.")
+            else:
+                raise ConnectionError(
+                    f"Failed to connect to Vastbase (default alias): {e}"
+                ) from e
         try:
             connect(**conn_kwargs, using=alias)
-        except Exception:
-            logger.debug(
-                "Connection already exists for alias '%s', reusing.", alias
-            )
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "already" in err_msg or "exist" in err_msg or "duplicate" in err_msg:
+                logger.debug(
+                    "Connection already exists for alias '%s', reusing.", alias
+                )
+            else:
+                raise ConnectionError(
+                    f"Failed to connect to Vastbase (alias '{alias}'): {e}"
+                ) from e
 
         # 2. Legacy table detection
         legacy_name = f"data_{self.table_name}"
@@ -260,21 +290,26 @@ class VastbaseChatStore(BaseChatStore):
     def _next_id(self) -> int:
         """Generate the next unique ID for a new row.
 
-        Uses a timestamp-based counter: ``int(time.time() * 1_000_000) + counter``.
-        This is a pure Python operation with no database calls, making it safe
-        to call from both synchronous and asynchronous contexts.
+        Uses a timestamp-based counter with a random component:
+        ``int(time.time() * 1_000_000) * 100 + counter + random_offset``.
 
-        The microsecond timestamp prefix provides reasonable uniqueness across
-        store instances, and the counter ensures monotonicity within a single
-        instance.
+        P2 #12: Added random offset to prevent multi-instance ID collisions.
+        The microsecond timestamp provides temporal uniqueness, the counter
+        ensures monotonicity within a single instance, and the random offset
+        differentiates concurrent instances started at the same time.
         """
         self._id_counter += 1
-        return int(time.time() * 1_000_000) + self._id_counter
+        random_offset = random.randint(0, 99)
+        return int(time.time() * 1_000_000) * 100 + self._id_counter + random_offset
 
     @staticmethod
     def _escape(value: str) -> str:
-        """Escape single quotes in string values for pyvastbase expr."""
-        return value.replace("'", "''")
+        """Escape special characters in string values for pyvastbase expr.
+
+        P0 #1: Handle backslashes before single quotes to prevent
+        expression injection via escaped quote sequences.
+        """
+        return value.replace("\\", "\\\\").replace("'", "''")
 
     # ==================================================================
     # Synchronous Methods — Core CRUD (Wave 1)
@@ -288,11 +323,14 @@ class VastbaseChatStore(BaseChatStore):
         Args:
             key: Unique identifier for the conversation.
             messages: List of ChatMessage objects to store.
+
+        Raises:
+            ValueError: If a message cannot be serialized to JSON.
         """
         self._ensure_initialized()
 
-        # Serialize all messages to JSON
-        value = json.dumps([m.model_dump(mode="json") for m in messages])
+        # P1 #4 / P2 #10: Serialize messages safely
+        value = self._serialize_messages(messages)
 
         # Check if key already exists
         existing = self._coll.query(
@@ -404,7 +442,13 @@ class VastbaseChatStore(BaseChatStore):
             parsed = json.loads(results[0]["value"])
             messages = [ChatMessage.model_validate(m) for m in parsed]
         except (json.JSONDecodeError, KeyError, TypeError):
-            messages = []
+            # P2 #8: corrupted data — still delete the row but return None
+            logger.warning(
+                "Corrupted data for key '%s', deleting row and returning None",
+                key,
+            )
+            self._coll.delete(expr=f"key = '{self._escape(key)}'")
+            return None
 
         # Delete the row
         self._coll.delete(expr=f"key = '{self._escape(key)}'")
@@ -506,8 +550,9 @@ class VastbaseChatStore(BaseChatStore):
         """
         self._ensure_initialized()
 
+        # P2 #11: explicit high limit to avoid truncation on large stores
         results = self._coll.query(
-            expr="1=1", output_fields=["key"]
+            expr="1=1", output_fields=["key"], limit=10000
         )
 
         return [r["key"] for r in results]
@@ -517,23 +562,70 @@ class VastbaseChatStore(BaseChatStore):
     # ==================================================================
 
     async def _ensure_async_initialized(self) -> None:
-        """Ensure the async Collection is available (lazy init)."""
-        if self._async_coll is None:
-            from pyvastbase import AsyncCollection, AsyncConnections
+        """Ensure the async Collection is available (lazy init).
 
-            alias = f"chatstore_{self._actual_table_name or self.table_name}"
-            await AsyncConnections.connect(
-                alias,
-                host=self.host,
-                port=self.port,
-                database=self.database,
-                user=self.user,
-                password=self.password,
-            )
-            self._async_coll = AsyncCollection(
-                self._actual_table_name or self.table_name,
-                using=alias,
-            )
+        P2 #13: Uses asyncio.Lock to prevent concurrent initialization races.
+        P2 #15: Wraps connection in try/except for robust error handling.
+        """
+        if self._async_lock is None:
+            self._async_lock = asyncio.Lock()
+
+        async with self._async_lock:
+            if self._async_coll is None:
+                from pyvastbase import AsyncCollection, AsyncConnections
+
+                alias = f"chatstore_{self._actual_table_name or self.table_name}"
+                try:
+                    await AsyncConnections.connect(
+                        alias,
+                        host=self.host,
+                        port=self.port,
+                        database=self.database,
+                        user=self.user,
+                        password=self.password,
+                    )
+                except Exception as e:
+                    err_msg = str(e).lower()
+                    if not ("already" in err_msg or "exist" in err_msg or "duplicate" in err_msg):
+                        raise ConnectionError(
+                            f"Failed to create async connection "
+                            f"(alias '{alias}'): {e}"
+                        ) from e
+
+                self._async_coll = AsyncCollection(
+                    self._actual_table_name or self.table_name,
+                    using=alias,
+                )
+
+    def _serialize_messages(
+        self, messages: List[Any]
+    ) -> str:
+        """Serialize a list of messages to a JSON string.
+
+        Handles ChatMessage, dict, and other types with error reporting.
+
+        P1 #4: Prevents double JSON serialization for dict messages.
+        P2 #10: Raises ValueError for unserializable objects.
+        """
+        serialized = []
+        for i, m in enumerate(messages):
+            try:
+                if isinstance(m, ChatMessage):
+                    serialized.append(m.model_dump(mode="json"))
+                elif isinstance(m, dict):
+                    serialized.append(m)
+                else:
+                    logger.warning(
+                        "Message at index %d is not a ChatMessage or dict "
+                        "(type=%s), attempting model_dump.",
+                        i, type(m).__name__,
+                    )
+                    serialized.append(m.model_dump(mode="json"))
+            except (AttributeError, TypeError, ValueError) as e:
+                raise ValueError(
+                    f"Message at index {i} cannot be serialized: {e}"
+                ) from e
+        return json.dumps(serialized)
 
     async def aset_messages(
         self, key: str, messages: List[ChatMessage]
@@ -541,7 +633,7 @@ class VastbaseChatStore(BaseChatStore):
         """Async version of set_messages."""
         await self._ensure_async_initialized()
 
-        value = json.dumps([m.model_dump(mode="json") for m in messages])
+        value = self._serialize_messages(messages)
 
         existing = await self._async_coll.query(
             expr=f"key = '{self._escape(key)}'", limit=1
@@ -624,7 +716,14 @@ class VastbaseChatStore(BaseChatStore):
             parsed = json.loads(results[0]["value"])
             messages = [ChatMessage.model_validate(m) for m in parsed]
         except (json.JSONDecodeError, KeyError, TypeError):
-            messages = []
+            # P2 #8: corrupted data — still delete but return None
+            logger.warning(
+                "Async: corrupted data for key '%s', deleting row", key
+            )
+            await self._async_coll.delete(
+                expr=f"key = '{self._escape(key)}'"
+            )
+            return None
 
         await self._async_coll.delete(
             expr=f"key = '{self._escape(key)}'"
@@ -708,8 +807,34 @@ class VastbaseChatStore(BaseChatStore):
         """Async version of get_keys."""
         await self._ensure_async_initialized()
 
+        # P2 #11: explicit high limit to avoid truncation on large stores
         results = await self._async_coll.query(
-            expr="1=1", output_fields=["key"]
+            expr="1=1", output_fields=["key"], limit=10000
         )
 
         return [r["key"] for r in results]
+
+    def __del__(self):
+        """Best-effort cleanup of async connections on garbage collection.
+
+        P2 #14: Schedule async connection cleanup without blocking.
+        """
+        if self._async_coll is not None:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self._close_async())
+                else:
+                    loop.run_until_complete(self._close_async())
+            except Exception:
+                pass  # Event loop may be closed during GC
+
+    async def _close_async(self):
+        """Close the async collection connection."""
+        try:
+            from pyvastbase import AsyncConnections
+
+            alias = f"chatstore_{self._actual_table_name or self.table_name}"
+            await AsyncConnections.close(alias)
+        except Exception:
+            pass  # Best-effort cleanup

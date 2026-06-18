@@ -59,7 +59,7 @@ def vastbase_connection():
         database=VASTBASE_CONFIG["database"],
         user=VASTBASE_CONFIG["user"],
         password=VASTBASE_CONFIG["password"],
-        alias=f"test_chatstore_{os.getpid()}",
+        using=f"test_chatstore_{os.getpid()}",
     )
     yield VASTBASE_CONFIG
     # Cleanup: close all connections
