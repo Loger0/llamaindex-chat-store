@@ -1,7 +1,7 @@
 # Nyquist 验证映射表 — LlamaIndex ChatStore Vastbase 适配
 
 > 状态: ✅ 已通过 | ⏳ 待实现 | ⚠️ SDK 阻塞 | ❌ 无覆盖
-> 最后验证: 2026-06-18
+> 最后验证: 2026-06-18 (test-adapter v2: 68/68 PASS, async SDK bug resolved)
 
 ## 方法级映射
 
@@ -24,13 +24,13 @@
 | M-15 | required_methods.sync | delete_last_message (空) | `pytest tests/test_chat_store_sync.py::test_delete_last_message_empty_array -v` | 集成 | ✅ |
 | M-16 | required_methods.sync | get_keys | `pytest tests/test_chat_store_sync.py::test_get_keys -v` | 集成 | ✅ |
 | M-17 | required_methods.sync | get_keys (空 store) | `pytest tests/test_chat_store_sync.py::test_get_keys_empty_store -v` | 集成 | ✅ |
-| M-18 | required_methods.async | aset_messages | `pytest tests/test_chat_store_async.py::test_async_set_and_retrieve_messages -v` | 集成 | ⚠️ |
-| M-19 | required_methods.async | aget_messages | `pytest tests/test_chat_store_async.py::test_async_get_messages_nonexistent_key -v` | 集成 | ⚠️ |
-| M-20 | required_methods.async | async_add_message | `pytest tests/test_chat_store_async.py::test_async_add_message -v` | 集成 | ⚠️ |
-| M-21 | required_methods.async | adelete_messages | `pytest tests/test_chat_store_async.py::test_async_delete_messages -v` | 集成 | ⚠️ |
-| M-22 | required_methods.async | adelete_message | `pytest tests/test_chat_store_async.py::test_async_delete_specific_message -v` | 集成 | ⚠️ |
-| M-23 | required_methods.async | adelete_last_message | `pytest tests/test_chat_store_async.py::test_async_delete_last_message -v` | 集成 | ⚠️ |
-| M-24 | required_methods.async | aget_keys | `pytest tests/test_chat_store_async.py::test_async_get_keys -v` | 集成 | ⚠️ |
+| M-18 | required_methods.async | aset_messages | `pytest tests/test_chat_store_async.py::test_async_set_and_retrieve_messages -v` | 集成 | ✅ |
+| M-19 | required_methods.async | aget_messages | `pytest tests/test_chat_store_async.py::test_async_get_messages_nonexistent_key -v` | 集成 | ✅ |
+| M-20 | required_methods.async | async_add_message | `pytest tests/test_chat_store_async.py::test_async_add_message -v` | 集成 | ✅ |
+| M-21 | required_methods.async | adelete_messages | `pytest tests/test_chat_store_async.py::test_async_delete_messages -v` | 集成 | ✅ |
+| M-22 | required_methods.async | adelete_message | `pytest tests/test_chat_store_async.py::test_async_delete_specific_message -v` | 集成 | ✅ |
+| M-23 | required_methods.async | adelete_last_message | `pytest tests/test_chat_store_async.py::test_async_delete_last_message -v` | 集成 | ✅ |
+| M-24 | required_methods.async | aget_keys | `pytest tests/test_chat_store_async.py::test_async_get_keys -v` | 集成 | ✅ |
 | M-25 | required_methods | 继承 BaseChatStore | `pytest tests/test_chat_store_sync.py::test_vastbase_chat_store_inherits_base_chat_store -v` | 单元 | ✅ |
 | M-26 | required_methods | from_params | `pytest tests/test_chat_store_init.py::test_from_params_creates_instance -v` | 集成 | ✅ |
 | M-27 | required_methods | from_uri | `pytest tests/test_chat_store_init.py::test_from_uri_parses_vastbase_uri -v` | 集成 | ✅ |
@@ -47,7 +47,7 @@
 
 | 映射 ID | 需求来源 | 场景 | 测试命令 | 类型 | 状态 |
 | :-----: | -------- | ---- | -------- | ---- | :--: |
-| D-01 | demo.scenarios | 多模态消息 (TextBlock+ImageBlock) | `pytest tests/test_chat_store_async.py::test_async_multimodal_messages -v` | E2E | ⚠️ |
+| D-01 | demo.scenarios | 多模态消息 (TextBlock+ImageBlock) | `pytest tests/test_chat_store_async.py::test_async_multimodal_messages -v` | E2E | ✅ |
 | D-02 | demo.scenarios | additional_kwargs 保留 | `pytest tests/test_chat_store_integration.py::test_chat_message_additional_kwargs -v` | E2E | ✅ |
 | D-03 | demo.scenarios | 全部 MessageRole 类型 | `pytest tests/test_chat_store_integration.py::test_message_with_all_roles -v` | E2E | ✅ |
 
@@ -63,12 +63,12 @@
 
 ## 统计
 
-- 总需求数: 40 | 已通过: 33 | SDK 阻塞: 7 | 无覆盖: 0 | 覆盖率: 100%
-- 总测试函数: 67 | PASS: 50 | FAIL (SDK bug): 17
+- 总需求数: 40 | 已通过: 40 | SDK 阻塞: 0 | 无覆盖: 0 | 覆盖率: 100%
+- 总测试函数: 68 | PASS: 68 | FAIL: 0
 - 同步 7 方法: 全部 ✅ (22/22 tests)
-- 异步 7 方法: 全部 ⚠️ (0/17 tests — pyvastbase 0.2.7 AsyncCollection bug)
-- 初始化: 全部 ✅ (10/10 tests)
+- 异步 7 方法: 全部 ✅ (17/17 tests — SDK bug resolved)
+- 初始化: 全部 ✅ (11/11 tests)
 - 兼容性: 全部 ✅ (11/11 tests)
 - 集成: 全部 ✅ (7/7 tests)
 
-> ⚠️ 异步测试失败原因: pyvastbase 0.2.7 `AsyncCollection._load_schema_async()` 使用 named placeholders (`%(table_name)s`) 但传递 list 参数，psycopg3 要求 dict。需 pyvastbase >= 0.2.8 修复。
+> ✅ 全部 68 个测试通过，包括之前因 pyvastbase 0.2.7 AsyncCollection bug 阻塞的 17 个异步测试。
