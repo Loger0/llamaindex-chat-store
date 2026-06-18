@@ -35,6 +35,7 @@
 | 验证 | ✅ TES-30 | 68/68 PASS, Nyquist 40/40 (100%), async SDK bug resolved |
 | | ✅ TES-31 | Wave 1 CRUD done |
 | | ✅ TES-32 | 14/14 Wave 2 tests PASS (delete_messages + delete_message + delete_last_message + get_keys) |
+| | ✅ TES-33 | 68/68 PASS — async 17/17, integration 7/7, compat 11/11, sync 22/22, init 11/11 |
 
 ## Sub-Issues (TES-29 children)
 
@@ -43,7 +44,7 @@
 | 0 | TES-30 | 基础设施 — 包脚手架 + 初始化 + 数据模型 | ✅ done | 456924e6-ddae-4bc0-9d9e-f692f8d276a2 |
 | 1 | TES-31 | 核心 CRUD — set_messages + get_messages + add_message | ✅ done | 229409e3-aa65-4d5f-80d9-9e780a64cfd7 |
 | 2 | TES-32 | 删除操作 — delete_messages + delete_message + delete_last_message + get_keys | ✅ verified | b78e19be-17a4-4130-a5b0-b5c07971db48 |
-| 3 | TES-33 | 异步方法 + 集成测试 + 兼容性 + 文档 | backlog | 200e2303-9f1b-455c-a563-09eed7742e73 |
+| 3 | TES-33 | 异步方法 + 集成测试 + 兼容性 + 文档 | ✅ done | 200e2303-9f1b-455c-a563-09eed7742e73 |
 
 ## Key Decisions
 
@@ -53,7 +54,7 @@
 - **URI format**: vastbase://user:pass@host:port/db
 - **Error handling**: Silent None/empty list (matches upstream)
 
-## Test Results (2026-06-18, test-adapter verified)
+## Test Results (2026-06-18, adapter-dev TES-33 verified)
 
 - test_compat.py: 11/11 ✅
 - test_chat_store_sync.py: 22/22 ✅
